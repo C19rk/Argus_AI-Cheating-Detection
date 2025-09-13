@@ -1,0 +1,11 @@
+# Pose dataset configuration
+
+train: ./pose_data/images/train
+val: ./pose_data/images/valid
+
+# keypoints setup (17 standard COCO keypoints)
+kpt_shape: [17, 3] # 17 keypoints, (x,y,visibility)
+
+# Class names (COCO-style: only person for pose estimation)
+names:
+  0: person
