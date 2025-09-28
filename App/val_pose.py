@@ -1,14 +1,14 @@
 from ultralytics import YOLO
 
 def main():
-    # Load pretrained model
-    model = YOLO("yolo11n-pose.pt")
+    # Load trained model (best.pt from training)
+    model = YOLO("runs/pose/train/weights/best.pt")
 
-    # Run validation on COCO keypoints (just as demo, no local dataset needed)
+    # Validate
     model.val(
-        data="coco8-pose.yaml",  # built-in mini COCO dataset
+        data="mypose.yaml",
         imgsz=640,
-        device="cpu"             # or 0 if you have GPU
+        device=0
     )
 
 if __name__ == "__main__":

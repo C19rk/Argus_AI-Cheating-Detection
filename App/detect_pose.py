@@ -2,16 +2,16 @@ from ultralytics import YOLO
 import cv2
 
 def main():
-    # Load pretrained model
-    model = YOLO("yolo11n-pose.pt")
+    # Load trained pose model
+    model = YOLO("runs/pose/train/weights/best.pt")
 
     # Run inference on an image
     results = model("test.jpg", imgsz=640, conf=0.5, save=True)
 
-    # Show result
+    # Display predictions
     for r in results:
-        im = r.plot()
-        cv2.imshow("Pose Detection", im)
+        im = r.plot()  # numpy array with boxes + keypoints drawn
+        cv2.imshow("Pose", im)
         cv2.waitKey(0)
         cv2.destroyAllWindows()
 

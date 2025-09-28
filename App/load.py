@@ -21,7 +21,7 @@ while True:
 
     results.render()
 
-    cv2.imshow('Argus - AI Cheating Detection', frame)
+    cv2.imshow('Thorondor - AI Cheating Detection', frame)
 
     if cv2.waitKey(1) & 0xFF == ord('q'):
         break

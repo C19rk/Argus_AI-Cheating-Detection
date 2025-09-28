@@ -3,6 +3,11 @@ import cv2
 from ultralytics import YOLO
 import logging
 import time
+import os
+import numpy as np
+
+# === Suppress OpenCV FFmpeg warnings ===
+os.environ["OPENCV_LOG_LEVEL"] = "SILENT"
 
 app = Flask(__name__)
 
@@ -14,55 +19,122 @@ logging.basicConfig(
     format="%(asctime)s - %(message)s",
 )
 
-# === Load YOLO model ===
-yolo_model_path = "../App/runs/aidetection2/weights/best.pt"
+# === Simulated GSM module ===
+class GSM:
+    def __init__(self, port=None, baudrate=None):
+        self.port = port
+        self.baudrate = baudrate
+        print(f"[SIM] GSM module initialized on port {port} at {baudrate} baud")
+
+    def send_sms(self, number, message):
+        log_msg = f"[SIM] Sending SMS to {number}: {message}"
+        print(log_msg)
+        logging.info(log_msg)
+        time.sleep(0.5)  # simulate delay
+
+# === Initialize simulated GSM ===
+gsm = GSM(port="COM3", baudrate=9600)
+
+# === YOLO models ===
+yolo_model_path = "../App/runs/aidetection4/weights/best.pt"
 yolo = YOLO(yolo_model_path)
+yolo_pose = YOLO("../App/yolo11n-pose.pt")  # Pose model
 
-# === Camera ===
-rtsp_url = "rtsp://administrator:admin123@192.168.100.203:554/stream2"
-cap = cv2.VideoCapture(0)
-cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+# === Camera sources ===
+camera_sources = {
+    "cam1": 0,
+    "cam2": 0,
+    "cam3": 0,
+}
 
+# === VideoCapture objects ===
+caps = {name: cv2.VideoCapture(url) for name, url in camera_sources.items()}
+for cap in caps.values():
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
 
-def generate_frames():
+# === Draw skeleton ===
+def draw_skeleton(frame, keypoints, conf_threshold=0.3, color=(0, 255, 0), thickness=2):
+    connections = [
+        (0,1),(0,2),(1,3),(2,4),(0,5),(0,6),(5,7),(7,9),(6,8),(8,10),
+        (5,6),(11,12),(11,13),(13,15),(12,14),(14,16)
+    ]
+    for i,j in connections:
+        if i < len(keypoints) and j < len(keypoints):
+            if keypoints.shape[1]==3:
+                x1,y1,c1 = keypoints[i]
+                x2,y2,c2 = keypoints[j]
+                if c1<conf_threshold or c2<conf_threshold:
+                    continue
+            else:
+                x1,y1 = keypoints[i]
+                x2,y2 = keypoints[j]
+            cv2.line(frame,(int(x1),int(y1)),(int(x2),int(y2)),color,thickness)
+    for kp in keypoints:
+        if keypoints.shape[1]==3:
+            x,y,c = kp
+            if c<conf_threshold: continue
+        else:
+            x,y = kp
+        cv2.circle(frame,(int(x),int(y)),3,color,-1)
+
+# === Alert cooldown and phone numbers ===
+phone_numbers = ["+639XXXXXXXXX", "+639YYYYYYYYY"]  # add your numbers here
+last_alert_time = {}
+ALERT_COOLDOWN = 10  # seconds
+suspicious_labels = ["phone","talking"]  # labels that trigger SMS
+
+# === Video generator ===
+def generate_frames(cam_name):
+    cap = caps[cam_name]
     while True:
         success, frame = cap.read()
-        if not success:
+        if not success or frame is None:
             continue
 
+        # YOLO object detection
         results = yolo.predict(frame, imgsz=640, conf=0.25)
-
         for r in results:
             for box in r.boxes:
                 cls = int(box.cls[0].item())
                 label = yolo.names[cls]
                 conf = float(box.conf[0].item())
-                x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
+                x1,y1,x2,y2 = map(int, box.xyxy[0].tolist())
 
-                # Draw YOLO box
-                color = (255, 0, 0) if label == "person" else (0, 255, 255)
-                cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-                cv2.putText(frame, f"{label} {conf:.2f}", (x1, y1 - 10),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+                color = (255,0,0) if label=="person" else (0,255,255)
+                cv2.rectangle(frame,(x1,y1),(x2,y2),color,2)
+                cv2.putText(frame,f"{label} {conf:.2f}",(x1,y1-10),
+                            cv2.FONT_HERSHEY_SIMPLEX,0.6,color,2)
 
-                # Log detection
-                log_msg = f"Detected {label} ({conf:.2f}) at [{x1},{y1},{x2},{y2}]"
+                log_msg = f"[{cam_name}] Detected {label} ({conf:.2f}) at [{x1},{y1},{x2},{y2}]"
                 print(log_msg)
                 logging.info(log_msg)
 
-        ret, buffer = cv2.imencode('.jpg', frame)
-        if not ret:
-            continue
-        frame_bytes = buffer.tobytes()
+                # Send SMS if suspicious and cooldown passed
+                if label in suspicious_labels:
+                    key = f"{cam_name}_{label}"
+                    now = time.time()
+                    if key not in last_alert_time or now - last_alert_time[key] > ALERT_COOLDOWN:
+                        for number in phone_numbers:
+                            gsm.send_sms(number,f"Alert! Detected {label} on {cam_name}")
+                        last_alert_time[key] = now
 
+        # YOLO pose detection
+        pose_results = yolo_pose.predict(frame, imgsz=640, conf=0.25)
+        for r in pose_results:
+            if hasattr(r,"keypoints") and r.keypoints is not None:
+                for person_kpts in r.keypoints.xy:
+                    keypoints_np = person_kpts.cpu().numpy()
+                    draw_skeleton(frame,keypoints_np)
+
+        ret, buffer = cv2.imencode('.jpg',frame)
+        if not ret: continue
         yield (b'--frame\r\n'
-               b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
+               b'Content-Type: image/jpeg\r\n\r\n'+buffer.tobytes()+b'\r\n')
 
-
-# === Live Log Streaming via SSE ===
+# === Log streaming ===
 def follow(logfile):
-    logfile.seek(0, 2)  # Go to end
+    logfile.seek(0,2)
     while True:
         line = logfile.readline()
         if not line:
@@ -70,10 +142,9 @@ def follow(logfile):
             continue
         yield f"data: {line}\n\n"
 
-
+# === Flask routes ===
 @app.route('/')
 def index():
-    # Flexbox layout: video on left, log on right
     template = """
     <html>
     <head>
@@ -84,13 +155,20 @@ def index():
             .video { flex: 2; padding: 10px; }
             .log { flex: 1; padding: 10px; background-color: #f0f0f0; overflow-y: scroll; border-left: 2px solid #ccc; }
             img { width: 100%; height: auto; }
+            .buttons { margin-bottom: 10px; }
+            button { margin-right: 10px; padding: 8px 16px; }
         </style>
     </head>
     <body>
         <div class="container">
             <div class="video">
                 <h2>Live Video</h2>
-                <img src="/video">
+                <div class="buttons">
+                    <button onclick="switchCam('cam1')">Camera 1</button>
+                    <button onclick="switchCam('cam2')">Camera 2</button>
+                    <button onclick="switchCam('cam3')">Camera 3</button>
+                </div>
+                <img id="videoStream" src="/video/cam1">
             </div>
             <div class="log">
                 <h2>Live Detection Log</h2>
@@ -98,30 +176,27 @@ def index():
             </div>
         </div>
         <script>
+            function switchCam(camName){ document.getElementById("videoStream").src="/video/"+camName; }
             var evtSource = new EventSource("/log_stream");
             var logDiv = document.getElementById("log");
-            evtSource.onmessage = function(e) {
-                logDiv.innerHTML += e.data + "<br>";
-                logDiv.scrollTop = logDiv.scrollHeight;
-            };
+            evtSource.onmessage = function(e){ logDiv.innerHTML+=e.data+"<br>"; logDiv.scrollTop=logDiv.scrollHeight; }
         </script>
     </body>
     </html>
     """
     return render_template_string(template)
 
-
-@app.route('/video')
-def video():
-    return Response(generate_frames(),
+@app.route('/video/<cam_name>')
+def video(cam_name):
+    if cam_name not in caps:
+        return "Camera not found", 404
+    return Response(generate_frames(cam_name),
                     mimetype='multipart/x-mixed-replace; boundary=frame')
-
 
 @app.route('/log_stream')
 def log_stream():
-    logfile = open(log_file, "r")
-    return Response(follow(logfile), mimetype="text/event-stream")
+    logfile = open(log_file,"r")
+    return Response(follow(logfile),mimetype="text/event-stream")
 
-
-if __name__ == "__main__":
+if __name__=="__main__":
     app.run(debug=True, host="0.0.0.0", port=5000)

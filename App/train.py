@@ -11,7 +11,7 @@ def main():
         data=data_yaml_path,          # Use absolute path here
         epochs=30,
         imgsz=640,
-        optimizer="AdamW",
+#        optimizer="SGD",
         batch=8,
         project=os.path.join(base_dir, 'runs'),  # Optional: output relative to App
         name="aidetection"
