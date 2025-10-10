@@ -36,7 +36,7 @@ class GSM:
 gsm = GSM(port="COM3", baudrate=9600)
 
 # === YOLO models ===
-yolo_model_path = "../App/runs/aidetection4/weights/best.pt"
+yolo_model_path = "../App/runs/aidetection7/weights/best.pt"
 yolo = YOLO(yolo_model_path)
 yolo_pose = YOLO("../App/yolo11n-pose.pt")  # Pose model
 
@@ -93,7 +93,7 @@ def generate_frames(cam_name):
             continue
 
         # YOLO object detection
-        results = yolo.predict(frame, imgsz=640, conf=0.25)
+        results = yolo.predict(frame, imgsz=640, conf=0.50)
         for r in results:
             for box in r.boxes:
                 cls = int(box.cls[0].item())
@@ -119,13 +119,71 @@ def generate_frames(cam_name):
                             gsm.send_sms(number,f"Alert! Detected {label} on {cam_name}")
                         last_alert_time[key] = now
 
-        # YOLO pose detection
+        # === YOLO pose detection and head direction ===
         pose_results = yolo_pose.predict(frame, imgsz=640, conf=0.25)
         for r in pose_results:
-            if hasattr(r,"keypoints") and r.keypoints is not None:
+            if hasattr(r, "keypoints") and r.keypoints is not None:
                 for person_kpts in r.keypoints.xy:
                     keypoints_np = person_kpts.cpu().numpy()
-                    draw_skeleton(frame,keypoints_np)
+                    draw_skeleton(frame, keypoints_np)
+
+                    # --- Head direction detection (normalized and stable) ---
+                    def get_point(idx):
+                        return keypoints_np[idx] if idx < len(keypoints_np) else None
+
+                    nose = get_point(0)
+                    left_eye = get_point(1)
+                    right_eye = get_point(2)
+                    left_shoulder = get_point(5)
+                    right_shoulder = get_point(6)
+
+                    if any(p is None for p in [nose, left_eye, right_eye, left_shoulder, right_shoulder]):
+                        continue
+
+                    # Extract x, y
+                    nx, ny = nose[0], nose[1]
+                    lex, ley = left_eye[0], left_eye[1]
+                    rex, rey = right_eye[0], right_eye[1]
+                    lsx, lsy = left_shoulder[0], left_shoulder[1]
+                    rsx, rsy = right_shoulder[0], right_shoulder[1]
+
+                    # Compute reference points
+                    eye_mid_x = (lex + rex) / 2
+                    eye_mid_y = (ley + rey) / 2
+                    shoulder_mid_y = (lsy + rsy) / 2
+
+                    # Normalize distances
+                    eye_dist = max(abs(rex - lex), 1e-6)
+                    offset_x = (nx - eye_mid_x) / eye_dist
+                    offset_y = (ny - eye_mid_y) / eye_dist
+
+                    # Thresholds (tweak if needed)
+                    H_THRESH = 0.30   # left/right sensitivity
+                    DOWN_THRESH = 0.45
+                    UP_THRESH = -0.35
+
+                    label = "facing_camera"
+
+                    if offset_x > H_THRESH:
+                        label = "looking_right"
+                    elif offset_x < -H_THRESH:
+                        label = "looking_left"
+                    elif offset_y > DOWN_THRESH:
+                        label = "looking_down"
+                    elif offset_y < UP_THRESH:
+                        label = "looking_up"
+                    else:
+                        label = "facing_camera"
+
+                    # Draw label
+                    x, y = int(nx), int(ny) - 10
+                    cv2.putText(frame, label, (x, y),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+
+                    # Log result
+                    log_msg = f"[{cam_name}] Pose label: {label}"
+                    print(log_msg)
+                    logging.info(log_msg)
 
         ret, buffer = cv2.imencode('.jpg',frame)
         if not ret: continue
